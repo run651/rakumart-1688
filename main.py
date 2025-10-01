@@ -4,30 +4,54 @@ import requests
 import json
 import argparse
 import os
-from typing import List
+from typing import List, Dict, Any
 import webbrowser
 import tempfile
+import cmd
+import shutil
+from rakumart.display import display_all_results_table, display_all_search_result_items
+from rakumart.console import SearchResultConsole
+from rakumart.filters import apply_product_filters, collect_categories_from_products
+from rakumart.utils import convert_rmb_to_jpy, convert_jpy_to_rmb, get_product_price_in_jpy
+from rakumart.api_search import search_products, get_product_detail, get_image_id
+from rakumart.orders import (
+    create_order,
+    update_order_status,
+    cancel_order,
+    get_order_list,
+    get_order_detail,
+    get_stock_list,
+    create_porder,
+    update_porder_status,
+    cancel_porder,
+    get_porder_list,
+    get_porder_detail,
+    get_logistics_track,
+)
+from rakumart.config import (
+    APP_KEY,
+    APP_SECRET,
+    API_URL,
+    DETAIL_API_URL,
+    IMAGE_ID_API_URL,
+    LOGISTICS_API_URL,
+    TAGS_API_URL,
+    CREATE_ORDER_API_URL,
+    UPDATE_ORDER_STATUS_API_URL,
+    CANCEL_ORDER_API_URL,
+    ORDER_LIST_API_URL,
+    ORDER_DETAIL_API_URL,
+    STOCK_LIST_API_URL,
+    CREATE_PORDER_API_URL,
+    UPDATE_PORDER_STATUS_API_URL,
+    CANCEL_PORDER_API_URL,
+    PORDER_LIST_API_URL,
+    PORDER_DETAIL_API_URL,
+    LOGISTICS_TRACK_API_URL,
+)
+from rakumart.enrich import enrich_products_with_detail
 
-APP_KEY = os.getenv("APP_KEY", "56832_68d09f0d2a2c6")
-APP_SECRET = os.getenv("APP_SECRET", "eEtXGkyf9HFIsZ2i!ZOv")
-
-API_URL = os.getenv("API_URL", "https://apiwww.rakumart.com/open/goods/keywordsSearch")
-DETAIL_API_URL = os.getenv("DETAIL_API_URL", "https://apiwww.rakumart.com/open/goods/detail")
-IMAGE_ID_API_URL = os.getenv("IMAGE_ID_API_URL", "https://apiwww.rakumart.com/open/goods/getImageId")
-LOGISTICS_API_URL = os.getenv("LOGISTICS_API_URL", "https://apiwww.rakumart.com/open/currentUsefulLogistics")
-TAGS_API_URL = os.getenv("TAGS_API_URL", "https://apiwww.rakumart.com/open/currentUsefulTags")
-CREATE_ORDER_API_URL = os.getenv("CREATE_ORDER_API_URL", "https://apiwww.rakumart.com/open/createOrder")
-UPDATE_ORDER_STATUS_API_URL = os.getenv("UPDATE_ORDER_STATUS_API_URL", "https://apiwww.rakumart.com/open/updateOrderStatus")
-CANCEL_ORDER_API_URL = os.getenv("CANCEL_ORDER_API_URL", "https://apiwww.rakumart.com/open/cancelOrder")
-ORDER_LIST_API_URL = os.getenv("ORDER_LIST_API_URL", "https://apiwww.rakumart.com/open/orderList")
-ORDER_DETAIL_API_URL = os.getenv("ORDER_DETAIL_API_URL", "https://apiwww.rakumart.com/open/orderDetail")
-STOCK_LIST_API_URL = os.getenv("STOCK_LIST_API_URL", "https://apiwww.rakumart.com/open/stockList")
-CREATE_PORDER_API_URL = os.getenv("CREATE_PORDER_API_URL", "https://apiwww.rakumart.com/open/createPorder")
-UPDATE_PORDER_STATUS_API_URL = os.getenv("UPDATE_PORDER_STATUS_API_URL", "https://apiwww.rakumart.com/open/updatePorderStatus")
-CANCEL_PORDER_API_URL = os.getenv("CANCEL_PORDER_API_URL", "https://apiwww.rakumart.com/open/cancelPorder")
-PORDER_LIST_API_URL = os.getenv("PORDER_LIST_API_URL", "https://apiwww.rakumart.com/open/porderList")
-PORDER_DETAIL_API_URL = os.getenv("PORDER_DETAIL_API_URL", "https://apiwww.rakumart.com/open/porderDetail")
-LOGISTICS_TRACK_API_URL = os.getenv("LOGISTICS_TRACK_API_URL", "https://apiwww.rakumart.com/open/logisticsTrack")
+# API constants moved to rakumart.config
 
 
 def generate_sign(app_key: str, app_secret: str, timestamp: str) -> str:
@@ -38,6 +62,442 @@ def generate_sign(app_key: str, app_secret: str, timestamp: str) -> str:
     return hashlib.md5(raw_str.encode("utf-8")).hexdigest()
 
 
+def convert_rmb_to_jpy(rmb_price: float, exchange_rate: float = 20.0) -> float:
+    """
+    Convert RMB price to Japanese Yen.
+    Default exchange rate: 1 RMB = 20 JPY (approximate)
+    """
+    return rmb_price * exchange_rate
+
+
+def convert_jpy_to_rmb(jpy_price: float, exchange_rate: float = 20.0) -> float:
+    """
+    Convert Japanese Yen price to RMB.
+    Default exchange rate: 1 RMB = 20 JPY (approximate)
+    """
+    return jpy_price / exchange_rate
+
+
+def get_product_price_in_jpy(product: dict, exchange_rate: float = 20.0) -> float | None:
+    """
+    Extract and convert product price to Japanese Yen.
+    Returns None if price cannot be determined.
+    """
+    # Try various price fields
+    price_fields = ["goodsPrice", "price", "productPrice", "salePrice", "marketPrice"]
+    
+    for field in price_fields:
+        price = product.get(field)
+        if price is not None:
+            try:
+                # Handle string prices (remove currency symbols, commas, etc.)
+                if isinstance(price, str):
+                    import re
+                    # Remove currency symbols and extract numeric value
+                    price_clean = re.sub(r'[^\d.,]', '', price)
+                    if price_clean:
+                        # Handle comma as decimal separator
+                        price_clean = price_clean.replace(',', '.')
+                        price_val = float(price_clean)
+                    else:
+                        continue
+                else:
+                    price_val = float(price)
+                
+                # Convert RMB to JPY
+                return convert_rmb_to_jpy(price_val, exchange_rate)
+            except (ValueError, TypeError):
+                continue
+    
+    return None
+
+
+def filter_products_by_size(products: List[dict], max_length: float | None = None, 
+                          max_width: float | None = None, max_height: float | None = None,
+                          strict_mode: bool = False) -> List[dict]:
+    """
+    Filter products by size constraints (length, width, height).
+    In strict mode, products without size information are excluded.
+    In non-strict mode, products without size information are included by default.
+    """
+    if not any([max_length, max_width, max_height]):
+        return products
+    
+    filtered = []
+    for product in products:
+        # Get product dimensions from various possible fields
+        dimensions = product.get("dimensions", {})
+        if not dimensions:
+            # Try alternative field names
+            dimensions = product.get("size", {}) or product.get("specs", {})
+        
+        # Check each dimension constraint
+        length = dimensions.get("length") or dimensions.get("l") or dimensions.get("长")
+        width = dimensions.get("width") or dimensions.get("w") or dimensions.get("宽")
+        height = dimensions.get("height") or dimensions.get("h") or dimensions.get("高")
+        
+        # Convert to float if possible
+        try:
+            length_val = float(length) if length else None
+            width_val = float(width) if width else None
+            height_val = float(height) if height else None
+        except (ValueError, TypeError):
+            # If conversion fails, include the product only in non-strict mode
+            if not strict_mode:
+                filtered.append(product)
+            continue
+        
+        # In strict mode, exclude products missing required dimension info
+        if strict_mode:
+            if max_length and length_val is None:
+                continue
+            if max_width and width_val is None:
+                continue
+            if max_height and height_val is None:
+                continue
+        else:
+            # In non-strict mode, include products without dimension info
+            if not any([length_val, width_val, height_val]):
+                filtered.append(product)
+                continue
+        
+        # Check constraints
+        if max_length and length_val and length_val > max_length:
+            continue
+        if max_width and width_val and width_val > max_width:
+            continue
+        if max_height and height_val and height_val > max_height:
+            continue
+            
+        filtered.append(product)
+    
+    return filtered
+
+
+def filter_products_by_inventory(products: List[dict], min_inventory: int, strict_mode: bool = False) -> List[dict]:
+    """
+    Filter products by minimum inventory level.
+    In strict mode, products without inventory information are excluded.
+    In non-strict mode, products without inventory information are included by default.
+    """
+    if min_inventory is None:
+        return products
+    
+    filtered = []
+    for product in products:
+        # Get inventory from various possible fields
+        inventory = product.get("inventory") or product.get("stock") or product.get("quantity")
+        
+        # If no inventory info, handle based on strict mode
+        if inventory is None:
+            if not strict_mode:
+                filtered.append(product)
+            continue
+            
+        try:
+            inventory_val = int(inventory)
+            if inventory_val >= min_inventory:
+                filtered.append(product)
+        except (ValueError, TypeError):
+            # If conversion fails, include the product only in non-strict mode
+            if not strict_mode:
+                filtered.append(product)
+    
+    return filtered
+
+
+def filter_products_by_delivery(products: List[dict], max_delivery_days: int, strict_mode: bool = False) -> List[dict]:
+    """
+    Filter products by maximum delivery days to Japan.
+    In strict mode, products without delivery information are excluded.
+    In non-strict mode, products without delivery information are included by default.
+    """
+    if max_delivery_days is None:
+        return products
+    
+    filtered = []
+    for product in products:
+        # Get delivery info from various possible fields
+        delivery = product.get("delivery_days") or product.get("shipping_days") or product.get("delivery_time")
+        
+        # If no delivery info, handle based on strict mode
+        if delivery is None:
+            if not strict_mode:
+                filtered.append(product)
+            continue
+            
+        try:
+            # Handle different delivery time formats
+            if isinstance(delivery, str):
+                # Extract numbers from strings like "3-5 days", "7 days", etc.
+                import re
+                numbers = re.findall(r'\d+', delivery)
+                if numbers:
+                    delivery_val = int(numbers[0])  # Use first number found
+                else:
+                    delivery_val = None
+            else:
+                delivery_val = int(delivery)
+                
+            if delivery_val is None or delivery_val <= max_delivery_days:
+                filtered.append(product)
+        except (ValueError, TypeError):
+            # If conversion fails, include the product only in non-strict mode
+            if not strict_mode:
+                filtered.append(product)
+    
+    return filtered
+
+
+def filter_products_by_shipping_fee(products: List[dict], max_shipping_fee: float, strict_mode: bool = False) -> List[dict]:
+    """
+    Filter products by maximum shipping fee to Japan.
+    In strict mode, products without shipping fee information are excluded.
+    In non-strict mode, products without shipping fee information are included by default.
+    """
+    if max_shipping_fee is None:
+        return products
+    
+    filtered = []
+    for product in products:
+        # Get shipping fee from various possible fields
+        shipping_fee = product.get("shipping_fee") or product.get("shipping_cost") or product.get("delivery_fee")
+        
+        # If no shipping fee info, handle based on strict mode
+        if shipping_fee is None:
+            if not strict_mode:
+                filtered.append(product)
+            continue
+            
+        try:
+            shipping_fee_val = float(shipping_fee)
+            if shipping_fee_val <= max_shipping_fee:
+                filtered.append(product)
+        except (ValueError, TypeError):
+            # If conversion fails, include the product only in non-strict mode
+            if not strict_mode:
+                filtered.append(product)
+    
+    return filtered
+
+
+def filter_products_by_weight(products: List[dict], max_weight: float, strict_mode: bool = False) -> List[dict]:
+    """
+    Filter products by maximum weight.
+    In strict mode, products without weight information are excluded.
+    In non-strict mode, products without weight information are included by default.
+    """
+    if max_weight is None:
+        return products
+    
+    filtered = []
+    for product in products:
+        # Get weight from various possible fields
+        weight = product.get("weight") or product.get("product_weight") or product.get("net_weight") or product.get("gross_weight")
+        
+        # If no weight info, handle based on strict mode
+        if weight is None:
+            if not strict_mode:
+                filtered.append(product)
+            continue
+            
+        try:
+            # Handle different weight formats and units
+            if isinstance(weight, str):
+                # Extract numeric value from strings like "500g", "1.2kg", "2.5 lbs", etc.
+                import re
+                # Remove common weight units and extract number
+                weight_clean = re.sub(r'[^\d.,]', '', weight)
+                if weight_clean:
+                    # Handle comma as decimal separator
+                    weight_clean = weight_clean.replace(',', '.')
+                    weight_val = float(weight_clean)
+                    
+                    # Convert to grams if needed (assuming kg if no unit specified and value > 10)
+                    if 'kg' in weight.lower() or (weight_val > 10 and 'g' not in weight.lower()):
+                        weight_val = weight_val * 1000  # Convert kg to grams
+                    elif 'lb' in weight.lower() or 'pound' in weight.lower():
+                        weight_val = weight_val * 453.592  # Convert pounds to grams
+                else:
+                    weight_val = None
+            else:
+                weight_val = float(weight)
+                
+            if weight_val is None or weight_val <= max_weight:
+                filtered.append(product)
+        except (ValueError, TypeError):
+            # If conversion fails, include the product only in non-strict mode
+            if not strict_mode:
+                filtered.append(product)
+    
+    return filtered
+
+
+def filter_products_by_jpy_price(products: List[dict], jpy_price_min: float | None = None, 
+                                jpy_price_max: float | None = None, exchange_rate: float = 20.0,
+                                strict_mode: bool = False) -> List[dict]:
+    """
+    Filter products by Japanese Yen price range.
+    In strict mode, products without price information are excluded.
+    In non-strict mode, products without price information are included by default.
+    """
+    if not any([jpy_price_min, jpy_price_max]):
+        return products
+    
+    filtered = []
+    for product in products:
+        # Get price in JPY
+        jpy_price = get_product_price_in_jpy(product, exchange_rate)
+        
+        # If no price info, handle based on strict mode
+        if jpy_price is None:
+            if not strict_mode:
+                filtered.append(product)
+            continue
+        
+        # Check price constraints
+        if jpy_price_min and jpy_price < jpy_price_min:
+            continue
+        if jpy_price_max and jpy_price > jpy_price_max:
+            continue
+            
+        filtered.append(product)
+    
+    return filtered
+
+
+def apply_product_filters(products: List[dict], categories: List[str] | None = None,
+                         subcategories: List[str] | None = None, sub_subcategories: List[str] | None = None,
+                         max_length: float | None = None, max_width: float | None = None, max_height: float | None = None,
+                         min_inventory: int | None = None, max_delivery_days: int | None = None,
+                         max_shipping_fee: float | None = None, max_weight: float | None = None,
+                         jpy_price_min: float | None = None, jpy_price_max: float | None = None,
+                         exchange_rate: float = 20.0, strict_mode: bool = False) -> List[dict]:
+    """
+    Apply all product filters to the given list of products.
+    In strict mode, only products meeting ALL criteria are returned.
+    """
+    filtered_products = products
+    
+    # Apply category filters first
+    filtered_products = filter_products_by_categories(
+        filtered_products, categories, subcategories, sub_subcategories
+    )
+    
+    # Apply JPY price filters
+    filtered_products = filter_products_by_jpy_price(
+        filtered_products, jpy_price_min, jpy_price_max, exchange_rate, strict_mode
+    )
+    
+    # Apply size filters
+    filtered_products = filter_products_by_size(
+        filtered_products, max_length, max_width, max_height, strict_mode
+    )
+    
+    # Apply weight filter
+    filtered_products = filter_products_by_weight(
+        filtered_products, max_weight, strict_mode
+    )
+    
+    # Apply inventory filter
+    filtered_products = filter_products_by_inventory(
+        filtered_products, min_inventory, strict_mode
+    )
+    
+    # Apply delivery filter
+    filtered_products = filter_products_by_delivery(
+        filtered_products, max_delivery_days, strict_mode
+    )
+    
+    # Apply shipping fee filter
+    filtered_products = filter_products_by_shipping_fee(
+        filtered_products, max_shipping_fee, strict_mode
+    )
+    
+    return filtered_products
+
+
+def get_available_categories(products: List[dict]) -> dict:
+    """
+    Extract available categories, subcategories, and sub-subcategories from a list of products.
+    Returns a dictionary with 'categories', 'subcategories', and 'sub_subcategories' lists.
+    """
+    categories = set()
+    subcategories = set()
+    sub_subcategories = set()
+    
+    for product in products:
+        # Extract category information from various possible fields
+        category_info = product.get("category") or product.get("categoryInfo") or {}
+        
+        if isinstance(category_info, dict):
+            # Main category
+            main_cat = category_info.get("category") or category_info.get("mainCategory") or category_info.get("一级类目")
+            if main_cat:
+                categories.add(main_cat)
+            
+            # Subcategory
+            sub_cat = category_info.get("subcategory") or category_info.get("subCategory") or category_info.get("二级类目")
+            if sub_cat:
+                subcategories.add(sub_cat)
+            
+            # Sub-subcategory
+            sub_sub_cat = category_info.get("subSubcategory") or category_info.get("sub_subcategory") or category_info.get("三级类目")
+            if sub_sub_cat:
+                sub_subcategories.add(sub_sub_cat)
+        elif isinstance(category_info, str):
+            # If it's a string, treat it as the main category
+            categories.add(category_info)
+    
+    return {
+        "categories": sorted(list(categories)),
+        "subcategories": sorted(list(subcategories)),
+        "sub_subcategories": sorted(list(sub_subcategories))
+    }
+
+
+def filter_products_by_categories(products: List[dict], categories: List[str] | None = None,
+                                 subcategories: List[str] | None = None,
+                                 sub_subcategories: List[str] | None = None) -> List[dict]:
+    """
+    Filter products by category, subcategory, and sub-subcategory.
+    Products without category information are included by default.
+    """
+    if not any([categories, subcategories, sub_subcategories]):
+        return products
+    
+    filtered = []
+    for product in products:
+        # Get category information
+        category_info = product.get("category") or product.get("categoryInfo") or {}
+        
+        if not category_info:
+            # If no category info, include the product
+            filtered.append(product)
+            continue
+        
+        # Check category filters
+        if categories:
+            main_cat = category_info.get("category") or category_info.get("mainCategory") or category_info.get("一级类目")
+            if not main_cat or main_cat not in categories:
+                continue
+        
+        if subcategories:
+            sub_cat = category_info.get("subcategory") or category_info.get("subCategory") or category_info.get("二级类目")
+            if not sub_cat or sub_cat not in subcategories:
+                continue
+        
+        if sub_subcategories:
+            sub_sub_cat = category_info.get("subSubcategory") or category_info.get("sub_subcategory") or category_info.get("三级类目")
+            if not sub_sub_cat or sub_sub_cat not in sub_subcategories:
+                continue
+        
+        filtered.append(product)
+    
+    return filtered
+
+
+# moved to rakumart.api_search.search_products
 def search_products(
     keyword: str,
     page: int = 1,
@@ -47,11 +507,51 @@ def search_products(
     price_max: str | None = None,
     order_key: str | None = None,
     order_value: str | None = None,
+    # Category filtering - Multi-select support for hierarchical categories
+    categories: List[str] | None = None,
+    subcategories: List[str] | None = None,
+    sub_subcategories: List[str] | None = None,
+    # Size filtering - Maximum values for length, width, height (in cm)
+    max_length: float | None = None,
+    max_width: float | None = None,
+    max_height: float | None = None,
+    # Weight filtering - Maximum weight (in grams)
+    max_weight: float | None = None,
+    # Japanese Yen price filtering - Price range in JPY
+    jpy_price_min: float | None = None,
+    jpy_price_max: float | None = None,
+    # Exchange rate for RMB to JPY conversion (default: 1 RMB = 20 JPY)
+    exchange_rate: float = 20.0,
+    # Strict filtering mode - Only return products meeting ALL criteria
+    strict_mode: bool = False,
+    # Inventory filtering - Minimum inventory level required
+    min_inventory: int | None = None,
+    # Delivery filtering - Maximum delivery days to Japan
+    max_delivery_days: int | None = None,
+    # Shipping fee filtering - Maximum shipping fee to Japan (in RMB)
+    max_shipping_fee: float | None = None,
     request_timeout_seconds: int = 15,
     app_key: str | None = None,
     app_secret: str | None = None,
     api_url: str | None = None,
 ) -> List[dict]:
+    """
+    Enhanced product search with comprehensive filtering capabilities.
+    
+    Features implemented:
+    1. Multi-category filtering (categories, subcategories, sub-subcategories)
+    2. Price range filtering (min/max values in RMB)
+    3. Japanese Yen price filtering (min/max values in JPY with automatic conversion)
+    4. Size filtering (maximum length, width, height)
+    5. Weight filtering (maximum weight in grams)
+    6. Inventory filtering (minimum inventory level)
+    7. Delivery date filtering (maximum delivery days to Japan)
+    8. Shipping fee filtering (maximum shipping fee to Japan)
+    9. Strict filtering mode (only return products meeting ALL criteria)
+    
+    The function applies both API-level filters (for supported features) and
+    client-side filters (for features not supported by the API).
+    """
     timestamp = str(int(time.time()))
 
     resolved_app_key = app_key or APP_KEY
@@ -78,6 +578,37 @@ def search_products(
         payload["order_by[0][key]"] = order_key
     if order_value is not None:
         payload["order_by[0][value]"] = order_value
+    
+    # Category filtering
+    if categories is not None:
+        for i, category in enumerate(categories):
+            payload[f"categories[{i}]"] = str(category)
+    if subcategories is not None:
+        for i, subcategory in enumerate(subcategories):
+            payload[f"subcategories[{i}]"] = str(subcategory)
+    if sub_subcategories is not None:
+        for i, sub_subcategory in enumerate(sub_subcategories):
+            payload[f"sub_subcategories[{i}]"] = str(sub_subcategory)
+    
+    # Size filtering
+    if max_length is not None:
+        payload["max_length"] = str(max_length)
+    if max_width is not None:
+        payload["max_width"] = str(max_width)
+    if max_height is not None:
+        payload["max_height"] = str(max_height)
+    
+    # Inventory filtering
+    if min_inventory is not None:
+        payload["min_inventory"] = str(min_inventory)
+    
+    # Delivery filtering
+    if max_delivery_days is not None:
+        payload["max_delivery_days"] = str(max_delivery_days)
+    
+    # Shipping fee filtering
+    if max_shipping_fee is not None:
+        payload["max_shipping_fee"] = str(max_shipping_fee)
 
     # 4) Send POST request
     try:
@@ -117,9 +648,30 @@ def search_products(
 
     if total is not None:
         print(f" API reported total: {total}")
+    
+    # Apply client-side filters for features not supported by the API
+    products = apply_product_filters(
+        products,
+        categories=categories,
+        subcategories=subcategories,
+        sub_subcategories=sub_subcategories,
+        max_length=max_length,
+        max_width=max_width,
+        max_height=max_height,
+        max_weight=max_weight,
+        jpy_price_min=jpy_price_min,
+        jpy_price_max=jpy_price_max,
+        exchange_rate=exchange_rate,
+        strict_mode=strict_mode,
+        min_inventory=min_inventory,
+        max_delivery_days=max_delivery_days,
+        max_shipping_fee=max_shipping_fee
+    )
+    
     return products
 
 
+# moved to rakumart.api_search.get_product_detail
 def get_product_detail(
     goods_id: str,
     shop_type: str = "1688",
@@ -179,6 +731,7 @@ def get_product_detail(
         return None
 
 
+# moved to rakumart.api_search.get_image_id
 def get_image_id(
     image_base64: str,
     request_timeout_seconds: int = 15,
@@ -234,6 +787,9 @@ def get_image_id(
         print(" Unexpected image ID API response structure:")
         print(json.dumps(data, ensure_ascii=False, indent=2))
         return None
+
+
+# moved to rakumart.console.SearchResultConsole
 
 
 def get_current_useful_logistics(
@@ -1077,7 +1633,9 @@ def get_logistics_track(
         return None
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Search products and fetch product details via API")
+    # Delegate to modular CLI
+    from rakumart.cli import run as cli_run
+    exit(cli_run())
     subparsers = parser.add_subparsers(dest="command", required=False)
 
     # Search subcommand (default behavior if no command given)
@@ -1091,6 +1649,37 @@ if __name__ == "__main__":
     search_parser.add_argument("--order-value", type=str, choices=["asc", "desc"], help="Sort direction (sent as order_by[0][value])")
     search_parser.add_argument("--shop-type", type=str, default="1688", help="Shop type (default: 1688)")
     search_parser.add_argument("--timeout", type=int, default=15, help="HTTP timeout seconds (default: 15)")
+    
+    # Category filtering
+    search_parser.add_argument("--categories", nargs="*", help="Filter by categories (multi-select)")
+    search_parser.add_argument("--subcategories", nargs="*", help="Filter by subcategories (multi-select)")
+    search_parser.add_argument("--sub-subcategories", nargs="*", help="Filter by sub-subcategories (multi-select)")
+    
+    # Size filtering
+    search_parser.add_argument("--max-length", type=float, help="Maximum length (cm)")
+    search_parser.add_argument("--max-width", type=float, help="Maximum width (cm)")
+    search_parser.add_argument("--max-height", type=float, help="Maximum height (cm)")
+    
+    # Weight filtering
+    search_parser.add_argument("--max-weight", type=float, help="Maximum weight (grams)")
+    
+    # Japanese Yen price filtering
+    search_parser.add_argument("--jpy-price-min", type=float, help="Minimum price in Japanese Yen")
+    search_parser.add_argument("--jpy-price-max", type=float, help="Maximum price in Japanese Yen")
+    search_parser.add_argument("--exchange-rate", type=float, default=20.0, help="RMB to JPY exchange rate (default: 20.0)")
+    
+    # Strict filtering mode
+    search_parser.add_argument("--strict", action="store_true", help="Strict mode: only return products meeting ALL criteria")
+    
+    # Inventory filtering
+    search_parser.add_argument("--min-inventory", type=int, help="Minimum inventory level")
+    
+    # Delivery filtering
+    search_parser.add_argument("--max-delivery-days", type=int, help="Maximum delivery days to Japan")
+    
+    # Shipping fee filtering
+    search_parser.add_argument("--max-shipping-fee", type=float, help="Maximum shipping fee to Japan (RMB)")
+    
     # Detail enrichment controls
     search_parser.add_argument("--with-detail", dest="with_detail", action="store_true", default=True, help="Also fetch detail (images, description) for results [default]")
     search_parser.add_argument("--no-detail", dest="with_detail", action="store_false", help="Do not fetch detail for results")
@@ -1099,6 +1688,9 @@ if __name__ == "__main__":
     search_parser.add_argument("--app-key", type=str, help="Override APP_KEY for this call")
     search_parser.add_argument("--app-secret", type=str, help="Override APP_SECRET for this call")
     search_parser.add_argument("--verbose", action="store_true", help="Print request payload and endpoint")
+    search_parser.add_argument("--show-all-fields", action="store_true", help="Display all available fields in search results")
+    search_parser.add_argument("--show-empty-fields", action="store_true", help="Include empty fields in field analysis")
+    search_parser.add_argument("--display-all", action="store_true", help="Display all results in a formatted table like GUI")
 
     # Detail subcommand
     detail_parser = subparsers.add_parser("detail", help="Get product detail by goodsId")
@@ -1277,11 +1869,36 @@ if __name__ == "__main__":
     ltrack_parser.add_argument("--verbose", action="store_true", help="Print request payload and endpoint")
     ltrack_parser.add_argument("--timeline-only", action="store_true", help="Print only time/address timeline entries")
 
+    # Categories subcommand
+    categories_parser = subparsers.add_parser("categories", help="Get available categories from search results")
+    categories_parser.add_argument("keyword", nargs="?", default="laptop", help="Keyword to search (default: laptop)")
+    categories_parser.add_argument("--page", type=int, default=1, help="Page number (default: 1)")
+    categories_parser.add_argument("--page-size", type=int, default=50, help="Page size (default: 50)")
+    categories_parser.add_argument("--shop-type", type=str, default="1688", help="Shop type (default: 1688)")
+    categories_parser.add_argument("--timeout", type=int, default=15, help="HTTP timeout seconds (default: 15)")
+    categories_parser.add_argument("--app-key", type=str, help="Override APP_KEY for this call")
+    categories_parser.add_argument("--app-secret", type=str, help="Override APP_SECRET for this call")
+    categories_parser.add_argument("--api-url", type=str, help="Override search API URL")
+
     # GUI subcommand
     gui_parser = subparsers.add_parser("gui", help="Open a simple GUI to search and view details")
     gui_parser.add_argument("--shop-type", type=str, default="1688", help="Shop type (default: 1688)")
     gui_parser.add_argument("--timeout", type=int, default=15, help="HTTP timeout seconds (default: 15)")
     gui_parser.add_argument("--detail-limit", type=int, default=5, help="Max items to enrich with detail when listing")
+
+    # Console subcommand
+    console_parser = subparsers.add_parser("console", help="Interactive console for search results")
+    console_parser.add_argument("keyword", nargs="?", default="laptop", help="Keyword to search (default: laptop)")
+    console_parser.add_argument("--page", type=int, default=1, help="Page number (default: 1)")
+    console_parser.add_argument("--page-size", type=int, default=20, help="Page size (default: 20)")
+    console_parser.add_argument("--shop-type", type=str, default="1688", help="Shop type (default: 1688)")
+    console_parser.add_argument("--timeout", type=int, default=15, help="HTTP timeout seconds (default: 15)")
+    console_parser.add_argument("--app-key", type=str, help="Override APP_KEY for this call")
+    console_parser.add_argument("--app-secret", type=str, help="Override APP_SECRET for this call")
+    console_parser.add_argument("--api-url", type=str, help="Override search API URL")
+    console_parser.add_argument("--with-detail", dest="with_detail", action="store_true", default=True, help="Also fetch detail for results [default]")
+    console_parser.add_argument("--no-detail", dest="with_detail", action="store_false", help="Do not fetch detail for results")
+    console_parser.add_argument("--detail-limit", type=int, default=10, help="Max number of items to enrich with detail (default: 10)")
 
     # Parse first
     args = parser.parse_args()
@@ -1321,6 +1938,8 @@ if __name__ == "__main__":
             args = parser.parse_args(["porder-detail", *argv])
         elif any(tok == "ltrack" or tok.startswith("--express-no") for tok in argv):
             args = parser.parse_args(["ltrack", *argv])
+        elif any(tok == "categories" for tok in argv):
+            args = parser.parse_args(["categories", *argv])
         else:
             args = parser.parse_args(["search", *argv])
 
@@ -1336,6 +1955,28 @@ if __name__ == "__main__":
             price_max=getattr(args, "price_max", None),
             order_key=getattr(args, "order_key", None),
             order_value=getattr(args, "order_value", None),
+            # Category filtering
+            categories=getattr(args, "categories", None),
+            subcategories=getattr(args, "subcategories", None),
+            sub_subcategories=getattr(args, "sub_subcategories", None),
+            # Size filtering
+            max_length=getattr(args, "max_length", None),
+            max_width=getattr(args, "max_width", None),
+            max_height=getattr(args, "max_height", None),
+            # Weight filtering
+            max_weight=getattr(args, "max_weight", None),
+            # Japanese Yen price filtering
+            jpy_price_min=getattr(args, "jpy_price_min", None),
+            jpy_price_max=getattr(args, "jpy_price_max", None),
+            exchange_rate=getattr(args, "exchange_rate", 20.0),
+            # Strict filtering mode
+            strict_mode=getattr(args, "strict", False),
+            # Inventory filtering
+            min_inventory=getattr(args, "min_inventory", None),
+            # Delivery filtering
+            max_delivery_days=getattr(args, "max_delivery_days", None),
+            # Shipping fee filtering
+            max_shipping_fee=getattr(args, "max_shipping_fee", None),
             request_timeout_seconds=args.timeout,
             shop_type=getattr(args, "shop_type", "1688"),
             app_key=getattr(args, "app_key", None),
@@ -1346,29 +1987,33 @@ if __name__ == "__main__":
         # Optionally enrich with detail for first N items
         if getattr(args, "with_detail", True) and products:
             limit = max(0, int(getattr(args, "detail_limit", 0)))
-            num_to_enrich = len(products) if limit == 0 else min(limit, len(products))
-            for idx in range(num_to_enrich):
-                item = products[idx]
-                goods_id = str(item.get("goodsId", ""))
-                shop_type_val = item.get("shopType", getattr(args, "shop_type", "1688"))
-                if not goods_id:
-                    continue
-                detail = get_product_detail(
-                    goods_id=goods_id,
-                    shop_type=shop_type_val,
-                    request_timeout_seconds=args.timeout,
+            enrich_products_with_detail(
+                products,
+                get_detail_fn=lambda **kwargs: get_product_detail(
+                    goods_id=kwargs.get("goods_id"),
+                    shop_type=kwargs.get("shop_type"),
+                    request_timeout_seconds=kwargs.get("request_timeout_seconds"),
                     app_key=getattr(args, "app_key", None),
                     app_secret=getattr(args, "app_secret", None),
                     api_url=None,
+                ),
+                shop_type=getattr(args, "shop_type", "1688"),
+                request_timeout_seconds=args.timeout,
+                limit=limit,
                 )
-                if detail:
-                    # Attach without overwriting original basic fields
-                    item["detailImages"] = detail.get("images", [])
-                    item["detailDescription"] = detail.get("description", "")
 
         print(f" Found {len(products)} products for keyword '{args.keyword}':\n")
-        for p in products:
-            print(json.dumps(p, ensure_ascii=False, indent=2))
+        
+        # Show all fields analysis if requested
+        if getattr(args, "show_all_fields", False):
+            display_all_search_result_items(products, show_empty=getattr(args, "show_empty_fields", False))
+        elif getattr(args, "display_all", False):
+            # Display all results in formatted table
+            display_all_results_table(products)
+        else:
+            # Default behavior - show individual products
+            for p in products:
+                print(json.dumps(p, ensure_ascii=False, indent=2))
     elif args.command == "detail":
         if getattr(args, "verbose", False):
             print(" Using API:", args.detail_api_url or DETAIL_API_URL)
@@ -1707,136 +2352,70 @@ if __name__ == "__main__":
                     print(json.dumps(data_obj, ensure_ascii=False, indent=2))
             else:
                 print(json.dumps(data_obj, ensure_ascii=False, indent=2))
+    elif args.command == "categories":
+        print(f"Getting available categories for keyword: '{args.keyword}' (page={args.page}, page_size={args.page_size})")
+        products = search_products(
+            args.keyword,
+            page=args.page,
+            page_size=args.page_size,
+            request_timeout_seconds=args.timeout,
+            shop_type=args.shop_type,
+            app_key=getattr(args, "app_key", None),
+            app_secret=getattr(args, "app_secret", None),
+            api_url=getattr(args, "api_url", None),
+        )
+        
+        if not products:
+            print(" No products found.")
+        else:
+            categories_info = get_available_categories(products)
+            print(f" Found {len(products)} products with the following categories:")
+            print("\nCategories:")
+            for cat in categories_info["categories"]:
+                print(f"  - {cat}")
+            print("\nSubcategories:")
+            for subcat in categories_info["subcategories"]:
+                print(f"  - {subcat}")
+            print("\nSub-subcategories:")
+            for sub_subcat in categories_info["sub_subcategories"]:
+                print(f"  - {sub_subcat}")
     elif args.command == "gui":
-        try:
-            import tkinter as tk
-            from tkinter import ttk, messagebox
-        except ImportError:
-            print(" Tkinter is not available in this Python installation.")
-            raise SystemExit(1)
+        from rakumart.gui import run_gui
+        run_gui(shop_type=getattr(args, "shop_type", "1688"), timeout=args.timeout, detail_limit=getattr(args, "detail_limit", 5))
+    elif args.command == "console":
+        print(f"Searching for keyword: '{args.keyword}' (page={args.page}, page_size={args.page_size})")
+        products = search_products(
+            args.keyword,
+            page=args.page,
+            page_size=args.page_size,
+            request_timeout_seconds=args.timeout,
+            shop_type=getattr(args, "shop_type", "1688"),
+            app_key=getattr(args, "app_key", None),
+            app_secret=getattr(args, "app_secret", None),
+            api_url=getattr(args, "api_url", None),
+        )
 
-        root = tk.Tk()
-        root.title("1688 商品検索")
-        root.geometry("1200x800")
-
-        # Top controls
-        controls = ttk.Frame(root)
-        controls.pack(fill=tk.X, padx=8, pady=8)
-
-        ttk.Label(controls, text="キーワード:").pack(side=tk.LEFT)
-        keyword_var = tk.StringVar(value="laptop")
-        keyword_entry = ttk.Entry(controls, textvariable=keyword_var, width=40)
-        keyword_entry.pack(side=tk.LEFT, padx=6)
-
-        page_var = tk.IntVar(value=1)
-        size_var = tk.IntVar(value=10)
-        ttk.Label(controls, text="ページ:").pack(side=tk.LEFT)
-        ttk.Entry(controls, textvariable=page_var, width=5).pack(side=tk.LEFT, padx=4)
-        ttk.Label(controls, text="サイズ:").pack(side=tk.LEFT)
-        ttk.Entry(controls, textvariable=size_var, width=5).pack(side=tk.LEFT, padx=4)
-
-        enrich_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(controls, text="詳細取得", variable=enrich_var).pack(side=tk.LEFT, padx=8)
-
-        def do_search():
-            try:
-                products = search_products(
-                    keyword_var.get().strip(),
-                    page=page_var.get(),
-                    page_size=size_var.get(),
-                    request_timeout_seconds=args.timeout,
-                    shop_type=args.shop_type,
+        # Optionally enrich with detail for first N items
+        if getattr(args, "with_detail", True) and products:
+            limit = max(0, int(getattr(args, "detail_limit", 0)))
+            enrich_products_with_detail(
+                products,
+                get_detail_fn=lambda **kwargs: get_product_detail(
+                    goods_id=kwargs.get("goods_id"),
+                    shop_type=kwargs.get("shop_type"),
+                    request_timeout_seconds=kwargs.get("request_timeout_seconds"),
+                    app_key=getattr(args, "app_key", None),
+                    app_secret=getattr(args, "app_secret", None),
+                    api_url=None,
+                ),
+                shop_type=getattr(args, "shop_type", "1688"),
+                request_timeout_seconds=args.timeout,
+                limit=limit,
                 )
-            except Exception as e:
-                messagebox.showerror("エラー", f"検索に失敗しました: {e}")
-                return
 
-            # Optionally enrich ALL results (not just first N)
-            if enrich_var.get():
-                for idx, item in enumerate(products):
-                    gid = str(item.get("goodsId", ""))
-                    if not gid:
-                        continue
-                    detail = get_product_detail(gid, shop_type=args.shop_type, request_timeout_seconds=args.timeout)
-                    if detail:
-                        item["detailImages"] = detail.get("images", [])
-                        item["detailDescription"] = detail.get("description", "")
-
-            # Populate list
-            for row in tree.get_children():
-                tree.delete(row)
-            for item in products:
-                shop_info = item.get("shopInfo", {})
-                shop_name = shop_info.get("shopName", "") if isinstance(shop_info, dict) else ""
-                tree.insert("", tk.END, iid=str(item.get("goodsId", "")), values=(
-                    item.get("goodsId", ""),
-                    item.get("titleC", ""),
-                    item.get("titleT", ""),
-                    item.get("goodsPrice", ""),
-                    item.get("monthSold", ""),
-                    shop_name,
-                ))
-
-            # Store for selection
-            nonlocal_data.clear()
-            for p in products:
-                nonlocal_data[str(p.get("goodsId", ""))] = p
-
-        ttk.Button(controls, text="検索", command=do_search).pack(side=tk.LEFT, padx=6)
-
-        # Results table
-        cols = ("goodsId", "titleC", "titleT", "price", "sold", "shopName")
-        tree = ttk.Treeview(root, columns=cols, show="headings")
-        tree.heading("goodsId", text="商品ID")
-        tree.heading("titleC", text="タイトル(中国語)")
-        tree.heading("titleT", text="タイトル(日本語)")
-        tree.heading("price", text="価格")
-        tree.heading("sold", text="月販売数")
-        tree.heading("shopName", text="ショップ名")
-        tree.column("goodsId", width=120)
-        tree.column("titleC", width=300)
-        tree.column("titleT", width=300)
-        tree.column("price", width=80)
-        tree.column("sold", width=100)
-        tree.column("shopName", width=200)
-        tree.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-
-        # Per-row actions
-        actions = ttk.Frame(root)
-        actions.pack(fill=tk.X, padx=8, pady=8)
-        def open_images():
-            sel = tree.selection()
-            if not sel:
-                return
-            item = nonlocal_data.get(sel[0])
-            if not item:
-                return
-            for url in item.get("detailImages", []):
-                try:
-                    webbrowser.open(url)
-                except Exception:
-                    pass
-
-        def open_description():
-            sel = tree.selection()
-            if not sel:
-                return
-            item = nonlocal_data.get(sel[0])
-            if not item:
-                return
-            html = item.get("detailDescription") or "<p>No description</p>"
-            try:
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".html", mode="w", encoding="utf-8") as f:
-                    f.write(html)
-                    path = f.name
-                webbrowser.open(path)
-            except Exception as e:
-                messagebox.showerror("エラー", f"説明の表示に失敗しました: {e}")
-
-        ttk.Button(actions, text="画像を開く", command=open_images).pack(side=tk.LEFT)
-        ttk.Button(actions, text="説明を開く", command=open_description).pack(side=tk.LEFT, padx=8)
-
-        # In-memory store
-        nonlocal_data = {}
-
-        root.mainloop()
+        if not products:
+            print("No products found.")
+            exit(0)
+        print(f"Found {len(products)} products. Starting interactive console...")
+        console = SearchResultConsole(products)
+        console.cmdloop()
