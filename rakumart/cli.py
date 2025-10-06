@@ -24,6 +24,7 @@ from .config import (
 )
 from .api_search import search_products, get_product_detail, get_image_id
 from .display import display_all_results_table, display_all_search_result_items
+from .db import save_products_to_db
 from .console import SearchResultConsole
 from .filters import collect_categories_from_products as get_available_categories
 from .orders import (
@@ -74,6 +75,8 @@ def run(argv: list[str] | None = None) -> int:
     search_parser.add_argument("--show-all-fields", action="store_true", help="Display all available fields in search results")
     search_parser.add_argument("--show-empty-fields", action="store_true", help="Include empty fields in field analysis")
     search_parser.add_argument("--display-all", action="store_true", help="Display all results in a formatted table like GUI")
+    search_parser.add_argument("--save-to-postgres", action="store_true", help="Save results to PostgreSQL (env: DATABASE_URL or PG* vars)")
+    search_parser.add_argument("--db-keyword", type=str, help="Override keyword stored with rows (defaults to search keyword)")
 
     # Detail
     detail_parser = subparsers.add_parser("detail", help="Get product detail by goodsId")
@@ -354,6 +357,9 @@ def run(argv: list[str] | None = None) -> int:
         else:
             for p in products:
                 print(json.dumps(p, ensure_ascii=False, indent=2))
+        if getattr(args, "save_to_postgres", False) and products:
+            saved = save_products_to_db(products, keyword=(getattr(args, "db_keyword", None) or args.keyword))
+            print(f"Saved {saved} products to PostgreSQL.")
         return 0
     elif args.command == "detail":
         detail = get_product_detail(
