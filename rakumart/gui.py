@@ -13,6 +13,7 @@ def run_gui(shop_type: str = "1688", timeout: int = 15, detail_limit: int = 5) -
     import tempfile
 
     from .api_search import search_products, get_product_detail
+    from .db import save_products_to_db, reset_products_clean_table
     from .enrich import enrich_products_with_detail
 
     root = tk.Tk()
@@ -185,6 +186,17 @@ def run_gui(shop_type: str = "1688", timeout: int = 15, detail_limit: int = 5) -
         nonlocal_data.clear()
         for p in products:
             nonlocal_data[str(p.get("goodsId", ""))] = p
+
+        # Auto-save to PostgreSQL after search
+        try:
+            kw = keyword_var.get().strip() or None
+            current = list(nonlocal_data.values())
+            saved = save_products_to_db(current, keyword=kw)
+            from tkinter import messagebox as _mb
+            _mb.showinfo("保存完了", f"PostgreSQL に {saved} 件保存しました。")
+        except Exception as e:
+            from tkinter import messagebox as _mb
+            _mb.showerror("エラー", f"PostgreSQL への保存に失敗しました: {e}")
 
     ttk.Button(controls, text="検索", command=do_search).pack(side=tk.LEFT, padx=6)
 
@@ -361,6 +373,30 @@ def run_gui(shop_type: str = "1688", timeout: int = 15, detail_limit: int = 5) -
 
     ttk.Button(actions, text="画像を開く", command=open_images).pack(side=tk.LEFT)
     ttk.Button(actions, text="説明を開く", command=open_description).pack(side=tk.LEFT, padx=8)
+
+    def save_to_postgres():
+        try:
+            current_products = list(nonlocal_data.values())
+            if not current_products:
+                messagebox.showinfo("情報", "保存するデータがありません。先に検索してください。")
+                return
+            kw = keyword_var.get().strip() or None
+            saved = save_products_to_db(current_products, keyword=kw)
+            messagebox.showinfo("保存完了", f"PostgreSQL に {saved} 件保存しました。")
+        except Exception as e:
+            messagebox.showerror("エラー", f"保存に失敗しました: {e}")
+
+    ttk.Button(actions, text="PostgreSQL に保存", command=save_to_postgres).pack(side=tk.LEFT, padx=8)
+
+    def reset_and_use_clean_schema():
+        try:
+            if messagebox.askyesno("確認", "既存のテーブル(products, products_flat)を削除し、products_clean のみを作成しますか？ この操作は元に戻せません。"):
+                reset_products_clean_table()
+                messagebox.showinfo("完了", "products_clean を作成しました。以降の保存でクリーン表にも保存されます。")
+        except Exception as e:
+            messagebox.showerror("エラー", f"初期化に失敗しました: {e}")
+
+    ttk.Button(actions, text="クリーンスキーマ初期化", command=reset_and_use_clean_schema).pack(side=tk.LEFT, padx=8)
 
     nonlocal_data: dict = {}
 
