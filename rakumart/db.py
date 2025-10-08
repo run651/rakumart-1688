@@ -3,6 +3,7 @@ from typing import Iterable, Optional
 import os
 import json
 import datetime as dt
+from .utils import generate_marketing_text
 
 # Optional .env loading
 try:  # pragma: no cover
@@ -157,6 +158,9 @@ def save_products_clean_to_db(
         except Exception:
             weight = None
 
+        # Generate SEO-optimized name and catchphrase from original name
+        gen_name, gen_copy = generate_marketing_text(title_t or title_c)
+
         rows.append((
             shop.get("shopName"),                 # manufacturer_name
             None,                                  # brand
@@ -164,8 +168,8 @@ def save_products_clean_to_db(
             str(p.get("topCategoryId")) if p.get("topCategoryId") is not None else None,  # main_category
             str(p.get("secondCategoryId")) if p.get("secondCategoryId") is not None else None,  # middle_category
             None,                                  # sub_category
-            (title_t or title_c),                  # product_name (prefer Japanese titleT)
-            None,                                  # catch_copy (no source in API; placeholder)
+            gen_name,                               # product_name (generated)
+            gen_copy,                               # catch_copy (generated)
             p.get("detailDescription"),           # product_description
             None,                                  # color
             None,                                  # size

@@ -1635,7 +1635,7 @@ def get_logistics_track(
 if __name__ == "__main__":
     # Delegate to modular CLI
     from rakumart.cli import run as cli_run
-    exit(cli_run())
+    raise SystemExit(cli_run())
     subparsers = parser.add_subparsers(dest="command", required=False)
 
     # Search subcommand (default behavior if no command given)

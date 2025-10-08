@@ -55,4 +55,9 @@ CANCEL_PORDER_API_URL = os.getenv("CANCEL_PORDER_API_URL", "https://apiwww.rakum
 PORDER_LIST_API_URL = os.getenv("PORDER_LIST_API_URL", "https://apiwww.rakumart.com/open/porderList")
 PORDER_DETAIL_API_URL = os.getenv("PORDER_DETAIL_API_URL", "https://apiwww.rakumart.com/open/porderDetail")
 
+# OpenAI
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# Default to a safe, modern instruct-capable model name but allow override
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
 
