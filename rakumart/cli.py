@@ -261,6 +261,17 @@ def run(argv: list[str] | None = None) -> int:
     console_parser.add_argument("--no-detail", dest="with_detail", action="store_false", help="Do not fetch detail for results")
     console_parser.add_argument("--detail-limit", type=int, default=10, help="Max number of items to enrich with detail (default: 10)")
 
+    # Categories summary
+    categories_parser = subparsers.add_parser("categories", help="Search and summarize categories from results")
+    categories_parser.add_argument("keyword", nargs="?", default="laptop", help="Keyword to search (default: laptop)")
+    categories_parser.add_argument("--page", type=int, default=1, help="Page number (default: 1)")
+    categories_parser.add_argument("--page-size", type=int, default=20, help="Page size (default: 20)")
+    categories_parser.add_argument("--shop-type", type=str, default="1688", help="Shop type (default: 1688)")
+    categories_parser.add_argument("--timeout", type=int, default=15, help="HTTP timeout seconds (default: 15)")
+    categories_parser.add_argument("--app-key", type=str, help="Override APP_KEY for this call")
+    categories_parser.add_argument("--app-secret", type=str, help="Override APP_SECRET for this call")
+    categories_parser.add_argument("--api-url", type=str, help="Override search API URL")
+
     args = parser.parse_args(argv)
 
     if getattr(args, "command", None) is None:
@@ -360,6 +371,32 @@ def run(argv: list[str] | None = None) -> int:
         if getattr(args, "save_to_postgres", False) and products:
             saved = save_products_to_db(products, keyword=(getattr(args, "db_keyword", None) or args.keyword))
             print(f"Saved {saved} products to PostgreSQL.")
+        return 0
+    elif args.command == "categories":
+        products = search_products(
+            args.keyword,
+            page=args.page,
+            page_size=args.page_size,
+            request_timeout_seconds=args.timeout,
+            shop_type=getattr(args, "shop_type", "1688"),
+            app_key=getattr(args, "app_key", None),
+            app_secret=getattr(args, "app_secret", None),
+            api_url=getattr(args, "api_url", None),
+        )
+        if not products:
+            print(" No products found.")
+            return 0
+        categories_info = get_available_categories(products)
+        print(f" Found {len(products)} products with the following categories:")
+        print("\nCategories:")
+        for cat in categories_info["categories"]:
+            print(f"  - {cat}")
+        print("\nSubcategories:")
+        for subcat in categories_info["subcategories"]:
+            print(f"  - {subcat}")
+        print("\nSub-subcategories:")
+        for sub_subcat in categories_info["sub_subcategories"]:
+            print(f"  - {sub_subcat}")
         return 0
     elif args.command == "detail":
         detail = get_product_detail(
