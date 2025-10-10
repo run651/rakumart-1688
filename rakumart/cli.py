@@ -90,6 +90,7 @@ def run(argv: list[str] | None = None) -> int:
     detail_parser.add_argument("--description-only", action="store_true", help="Print only the HTML description")
     detail_parser.add_argument("--images-only", action="store_true", help="Print only the image URLs array")
     detail_parser.add_argument("--images-and-description", action="store_true", help="Print both images and description together")
+    detail_parser.add_argument("--normalize", action="store_true", help="Normalize detail payload per spec")
 
     # Image
     image_parser = subparsers.add_parser("image", help="Get image ID by uploading base64 encoded image")
@@ -406,6 +407,7 @@ def run(argv: list[str] | None = None) -> int:
             app_key=getattr(args, "app_key", None),
             app_secret=getattr(args, "app_secret", None),
             api_url=getattr(args, "detail_api_url", None),
+            normalize=getattr(args, "normalize", False),
         )
         if detail is None:
             print(" No detail returned.")
