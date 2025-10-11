@@ -1,4 +1,30 @@
 import os
+import pathlib
+
+# Load environment variables from a .env file if python-dotenv is available
+try:
+    from dotenv import load_dotenv, find_dotenv  # type: ignore
+except Exception:
+    load_dotenv = None  # type: ignore
+else:
+    try:
+        # Prefer loading .env from the project root (one level above this file)
+        package_dir = pathlib.Path(__file__).resolve().parent
+        project_root = package_dir.parent
+        root_env = project_root / ".env"
+        if root_env.exists():
+            load_dotenv(dotenv_path=str(root_env), override=False)
+        else:
+            # Locate nearest .env (walking up) and load if found
+            _dotenv_path = find_dotenv(usecwd=True)
+            if _dotenv_path:
+                load_dotenv(_dotenv_path, override=False)
+            else:
+                # Fallback to default behavior
+                load_dotenv()
+    except Exception:
+        # Non-fatal: continue without .env
+        pass
 
 # Credentials
 APP_KEY = os.getenv("APP_KEY", "56832_68d09f0d2a2c6")
