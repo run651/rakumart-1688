@@ -1,0 +1,11 @@
+[33mcommit d234d200c9b5117a0638ca510743bee5f3df6d4a[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m)[m
+Author: run651 <rrun19643@gmail.com>
+Date:   Sat Oct 11 23:48:28 2025 +0900
+
+    apply gitignore rules
+
+[33mcommit 7ab6a7e4b06938eff5846433a7c3bb85f986f0f4[m
+Author: run651 <rrun19643@gmail.com>
+Date:   Sat Oct 11 23:37:32 2025 +0900
+
+    feat:add image processing function
