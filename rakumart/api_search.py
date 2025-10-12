@@ -123,6 +123,104 @@ def search_products(
     return products
 
 
+def _normalize_detail_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Best-effort normalization of product detail data shape per API spec."""
+    out: Dict[str, Any] = {}
+    # Top-level basics
+    out["fromUrl"] = payload.get("fromUrl")
+    out["fromPlatform"] = payload.get("fromPlatform")
+    out["fromPlatform_logo"] = payload.get("fromPlatform_logo")
+    out["shopId"] = str(payload.get("shopId")) if payload.get("shopId") is not None else None
+    out["shopName"] = payload.get("shopName")
+    out["goodsId"] = str(payload.get("goodsId")) if payload.get("goodsId") is not None else None
+    out["titleC"] = payload.get("titleC")
+    out["titleT"] = payload.get("titleT")
+    out["video"] = payload.get("video")
+    out["images"] = payload.get("images") if isinstance(payload.get("images"), list) else []
+    out["address"] = payload.get("address")
+    out["description"] = payload.get("description")
+
+    goods_info = payload.get("goodsInfo") if isinstance(payload.get("goodsInfo"), dict) else {}
+    out_goods: Dict[str, Any] = {}
+    out_goods["unit"] = goods_info.get("unit")
+    out_goods["minOrderQuantity"] = goods_info.get("minOrderQuantity")
+    out_goods["priceRangesType"] = goods_info.get("priceRangesType")
+
+    # priceRanges: list of {priceMin, priceMax, startQuantity}
+    price_ranges = []
+    for pr in goods_info.get("priceRanges", []) or []:
+        if not isinstance(pr, dict):
+            continue
+        price_ranges.append({
+            "priceMin": pr.get("priceMin"),
+            "priceMax": pr.get("priceMax"),
+            "startQuantity": pr.get("startQuantity"),
+        })
+    out_goods["priceRanges"] = price_ranges
+
+    # specification: list of {keyC, keyT, valueC[{name,picUrl}], valueT[{name,picUrl}]}
+    specs_out = []
+    for spec in goods_info.get("specification", []) or []:
+        if not isinstance(spec, dict):
+            continue
+        vals_c = []
+        for v in spec.get("valueC", []) or []:
+            if isinstance(v, dict):
+                vals_c.append({"name": v.get("name"), "picUrl": v.get("picUrl")})
+        vals_t = []
+        for v in spec.get("valueT", []) or []:
+            if isinstance(v, dict):
+                vals_t.append({"name": v.get("name"), "picUrl": v.get("picUrl")})
+        specs_out.append({
+            "keyC": spec.get("keyC"),
+            "keyT": spec.get("keyT"),
+            "valueC": vals_c,
+            "valueT": vals_t,
+        })
+    out_goods["specification"] = specs_out
+
+    # goodsInventory: list items with keyC/keyT and valueC/valueT arrays of sku entries
+    inv_out = []
+    for inv in goods_info.get("goodsInventory", []) or []:
+        if not isinstance(inv, dict):
+            continue
+        def _coerce_entries(entries):
+            res = []
+            for e in entries or []:
+                if not isinstance(e, dict):
+                    continue
+                res.append({
+                    "startQuantity": e.get("startQuantity"),
+                    "price": e.get("price"),
+                    "amountOnSale": e.get("amountOnSale"),
+                    "skuId": e.get("skuId"),
+                    "specId": e.get("specId"),
+                })
+            return res
+        inv_out.append({
+            "keyC": inv.get("keyC"),
+            "keyT": inv.get("keyT"),
+            "valueC": _coerce_entries(inv.get("valueC")),
+            "valueT": _coerce_entries(inv.get("valueT")),
+        })
+    out_goods["goodsInventory"] = inv_out
+
+    # detail: list of key/value pairs
+    detail_rows = []
+    for row in goods_info.get("detail", []) or []:
+        if isinstance(row, dict):
+            detail_rows.append({
+                "keyC": row.get("keyC"),
+                "valueC": row.get("valueC"),
+                "keyT": row.get("keyT"),
+                "valueT": row.get("valueT"),
+            })
+    out_goods["detail"] = detail_rows
+
+    out["goodsInfo"] = out_goods
+    return out
+
+
 def get_product_detail(
     goods_id: str,
     shop_type: str = "1688",
@@ -130,6 +228,8 @@ def get_product_detail(
     app_key: Optional[str] = None,
     app_secret: Optional[str] = None,
     api_url: Optional[str] = None,
+    *,
+    normalize: bool = False,
 ) -> Optional[dict]:
     timestamp = str(int(time.time()))
     resolved_app_key = app_key or APP_KEY
@@ -150,11 +250,19 @@ def get_product_detail(
         print(" Detail API failed:", data)
         return None
     try:
-        return data["data"]
+        detail = data["data"]
     except (KeyError, TypeError):
         print(" Unexpected detail API response structure:")
         print(json.dumps(data, ensure_ascii=False, indent=2))
         return None
+
+    if normalize:
+        try:
+            return _normalize_detail_payload(detail)
+        except Exception:
+            # Fall back to raw detail in case of unexpected structures
+            return detail
+    return detail
 
 
 def get_image_id(

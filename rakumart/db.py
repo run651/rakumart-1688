@@ -3,7 +3,7 @@ from typing import Iterable, Optional
 import os
 import json
 import datetime as dt
-from .utils import generate_marketing_text
+from .openai_api import generate_marketing_text
 
 # Optional .env loading
 try:  # pragma: no cover
@@ -227,7 +227,7 @@ def save_products_clean_to_db(
                 template=(
                     "(" 
                     "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
-                    "%s::jsonb, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s"
+                    "%s::jsonb, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s"
                     ")"
                 ),
             )
