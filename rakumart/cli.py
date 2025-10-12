@@ -34,6 +34,29 @@ from .orders import (
 )
 from .enrich import enrich_products_with_detail
 from .meta import get_logistics, get_tags
+try:
+    from .image_processing import process_product_images_from_db, process_all_product_images, ImageProcessor
+except ImportError:
+    # Handle the hyphen in filename
+    import importlib.util
+    import sys
+    from pathlib import Path
+    
+    # Load the image-processing module
+    spec = importlib.util.spec_from_file_location(
+        "image_processing", 
+        Path(__file__).parent / "image-processing.py"
+    )
+    image_processing = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(image_processing)
+    
+    # Make it available in the current namespace
+    sys.modules['rakumart.image_processing'] = image_processing
+    
+    # Import the functions
+    process_product_images_from_db = image_processing.process_product_images_from_db
+    process_all_product_images = image_processing.process_all_product_images
+    ImageProcessor = image_processing.ImageProcessor
 
 
 def run(argv: list[str] | None = None) -> int:
@@ -262,6 +285,22 @@ def run(argv: list[str] | None = None) -> int:
     console_parser.add_argument("--no-detail", dest="with_detail", action="store_false", help="Do not fetch detail for results")
     console_parser.add_argument("--detail-limit", type=int, default=10, help="Max number of items to enrich with detail (default: 10)")
 
+    # Image processing
+    process_parser = subparsers.add_parser("process-images", help="Process product images with AI")
+    process_parser.add_argument("--product-id", type=str, help="Process images for specific product ID")
+    process_parser.add_argument("--limit", type=int, help="Limit number of products to process")
+    process_parser.add_argument("--test-image", type=str, help="Test processing on a single image URL")
+    process_parser.add_argument("--output-dir", type=str, default="processed_images", help="Directory to save processed images (default: processed_images)")
+    process_parser.add_argument("--no-save", action="store_true", help="Don't save processed images to local storage")
+    process_parser.add_argument("--verbose", action="store_true", help="Verbose output")
+
+    # Product name optimization
+    optimize_parser = subparsers.add_parser("optimize-names", help="Optimize product names using OpenAI API")
+    optimize_parser.add_argument("--product-ids", nargs="+", help="Specific product IDs to optimize")
+    optimize_parser.add_argument("--limit", type=int, help="Limit number of products to process")
+    optimize_parser.add_argument("--dry-run", action="store_true", help="Show what would be updated without making changes")
+    optimize_parser.add_argument("--verbose", action="store_true", help="Verbose output")
+
     # Categories summary
     categories_parser = subparsers.add_parser("categories", help="Search and summarize categories from results")
     categories_parser.add_argument("keyword", nargs="?", default="laptop", help="Keyword to search (default: laptop)")
@@ -311,6 +350,10 @@ def run(argv: list[str] | None = None) -> int:
             args = parser.parse_args(["ltrack", *argv2])
         elif any(tok == "categories" for tok in argv2):
             args = parser.parse_args(["categories", *argv2])
+        elif any(tok == "process-images" for tok in argv2):
+            args = parser.parse_args(["process-images", *argv2])
+        elif any(tok == "optimize-names" for tok in argv2):
+            args = parser.parse_args(["optimize-names", *argv2])
         else:
             args = parser.parse_args(["search", *argv2])
 
@@ -531,6 +574,101 @@ def run(argv: list[str] | None = None) -> int:
                 print(json.dumps(data, ensure_ascii=False, indent=2))
         else:
             print(json.dumps(data, ensure_ascii=False, indent=2))
+        return 0
+    elif args.command == "process-images":
+        save_locally = not getattr(args, "no_save", False)
+        output_dir = getattr(args, "output_dir", "processed_images")
+        
+        if getattr(args, "test_image", None):
+            # Test processing on a single image
+            processor = ImageProcessor()
+            result = processor.process_image(args.test_image, save_locally=save_locally, output_dir=output_dir)
+            
+            if result:
+                print(f"Processing completed successfully!")
+                print(f"Original URL: {result['original_url']}")
+                print(f"Processed size: {result['processed_size']} bytes")
+                print(f"Text detections: {result['text_detections']}")
+                print(f"Face detections: {result['face_detections']}")
+                print(f"Logo detections: {result['logo_detections']}")
+                if result['local_path']:
+                    print(f"Saved to: {result['local_path']}")
+                else:
+                    print("Image not saved to local storage (--no-save flag used)")
+            else:
+                print("Failed to process image")
+                return 1
+        elif getattr(args, "product_id", None):
+            # Process images for a specific product
+            result = process_product_images_from_db(args.product_id, save_locally=save_locally, output_dir=output_dir)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            # Process images for all products
+            limit = getattr(args, "limit", None)
+            result = process_all_product_images(limit=limit)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    elif args.command == "optimize-names":
+        from .product_optimizer import update_product_names_in_db, get_products_needing_optimization, ProductNameOptimizer
+        
+        product_ids = getattr(args, "product_ids", None)
+        limit = getattr(args, "limit", None)
+        dry_run = getattr(args, "dry_run", False)
+        verbose = getattr(args, "verbose", False)
+        
+        if dry_run:
+            # Show what would be updated without making changes
+            products = get_products_needing_optimization(limit=limit)
+            print(f"Found {len(products)} products that would be optimized:")
+            print()
+            
+            optimizer = ProductNameOptimizer()
+            for i, product in enumerate(products[:10]):  # Show first 10 as preview
+                result = optimizer.optimize_product(product['product_id'], product['product_name'])
+                print(f"{i+1}. Product ID: {product['product_id']}")
+                try:
+                    print(f"   Original: {product['product_name']}")
+                    print(f"   Optimized: {result.optimized_name}")
+                    print(f"   Catch Copy: {result.catch_copy}")
+                except UnicodeEncodeError:
+                    print(f"   Original: [Japanese text - {len(product['product_name'])} chars]")
+                    print(f"   Optimized: [Japanese text - {len(result.optimized_name)} chars]")
+                    print(f"   Catch Copy: [Japanese text - {len(result.catch_copy)} chars]")
+                print()
+            
+            if len(products) > 10:
+                print(f"... and {len(products) - 10} more products")
+            
+            print(f"\nTotal products to optimize: {len(products)}")
+            print("Use without --dry-run to actually update the database")
+        else:
+            # Actually update the database
+            print("Starting product name optimization...")
+            if verbose:
+                print(f"Product IDs: {product_ids}")
+                print(f"Limit: {limit}")
+            
+            result = update_product_names_in_db(product_ids=product_ids, limit=limit)
+            
+            print(f"\nOptimization Results:")
+            print(f"Processed: {result['processed']}")
+            print(f"Successful: {result['successful']}")
+            print(f"Failed: {result['failed']}")
+            
+            if result['errors']:
+                print(f"\nErrors:")
+                for error in result['errors'][:5]:  # Show first 5 errors
+                    print(f"  - {error}")
+                if len(result['errors']) > 5:
+                    print(f"  ... and {len(result['errors']) - 5} more errors")
+            
+            if result['updated_products'] and verbose:
+                print(f"\nUpdated Products:")
+                for product in result['updated_products'][:5]:  # Show first 5
+                    print(f"  {product['product_id']}: {product['optimized_name'][:50]}...")
+                if len(result['updated_products']) > 5:
+                    print(f"  ... and {len(result['updated_products']) - 5} more")
+        
         return 0
     else:
         # Defer to main.py handlers for the rest to avoid duplication here

@@ -13,8 +13,9 @@ def run_gui(shop_type: str = "1688", timeout: int = 15, detail_limit: int = 5) -
     import tempfile
 
     from .api_search import search_products, get_product_detail
-    from .db_enhanced import save_products_to_db, reset_products_enhanced_table
+    from .db import save_products_to_db, reset_products_clean_table, fix_products_clean_schema
     from .enrich import enrich_products_with_detail
+    from .product_optimizer import update_product_names_in_db, get_products_needing_optimization, ProductNameOptimizer
 
     root = tk.Tk()
     root.title("1688 商品検索")
@@ -147,25 +148,17 @@ def run_gui(shop_type: str = "1688", timeout: int = 15, detail_limit: int = 5) -
             return
 
         if enrich_var.get():
-            # Fetch normalized details for enhanced database storage
-            enriched_products = []
-            for product in products:
-                try:
-                    detail = get_product_detail(
-                        goods_id=str(product.get("goodsId")),
-                        shop_type=shop_type,
-                        request_timeout_seconds=timeout,
-                        normalize=True
-                    )
-                    if detail:
-                        # Merge detail with basic product info
-                        enriched_product = {**product, **detail}
-                        enriched_products.append(enriched_product)
-                    else:
-                        enriched_products.append(product)
-                except Exception:
-                    enriched_products.append(product)
-            products = enriched_products
+            enrich_products_with_detail(
+                products,
+                get_detail_fn=lambda **kwargs: get_product_detail(
+                    goods_id=kwargs.get("goods_id"),
+                    shop_type=kwargs.get("shop_type"),
+                    request_timeout_seconds=kwargs.get("request_timeout_seconds"),
+                ),
+                shop_type=shop_type,
+                request_timeout_seconds=timeout,
+                limit=0,
+            )
 
         for row in tree.get_children():
             tree.delete(row)
@@ -203,8 +196,20 @@ def run_gui(shop_type: str = "1688", timeout: int = 15, detail_limit: int = 5) -
             from tkinter import messagebox as _mb
             _mb.showinfo("保存完了", f"PostgreSQL に {saved} 件保存しました。")
         except Exception as e:
-            from tkinter import messagebox as _mb
-            _mb.showerror("エラー", f"PostgreSQL への保存に失敗しました: {e}")
+            error_msg = str(e)
+            if "does not exist" in error_msg and "catch_copy" in error_msg:
+                # Try to fix the schema and retry
+                try:
+                    fix_products_clean_schema()
+                    saved = save_products_to_db(current, keyword=kw)
+                    from tkinter import messagebox as _mb
+                    _mb.showinfo("保存完了", f"スキーマを修正してPostgreSQL に {saved} 件保存しました。")
+                except Exception as e2:
+                    from tkinter import messagebox as _mb
+                    _mb.showerror("エラー", f"スキーマ修正後もPostgreSQL への保存に失敗しました: {e2}")
+            else:
+                from tkinter import messagebox as _mb
+                _mb.showerror("エラー", f"PostgreSQL への保存に失敗しました: {e}")
 
     ttk.Button(controls, text="検索", command=do_search).pack(side=tk.LEFT, padx=6)
 
@@ -347,76 +352,6 @@ def run_gui(shop_type: str = "1688", timeout: int = 15, detail_limit: int = 5) -
     v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
     h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
 
-    # Detailed info panel
-    detail_frame = ttk.LabelFrame(root, text="商品詳細")
-    detail_frame.pack(fill=tk.BOTH, padx=8, pady=4)
-    detail_text = tk.Text(detail_frame, height=12, wrap=tk.WORD)
-    detail_text.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
-
-    def _render_detail(detail: dict) -> str:
-        lines: List[str] = []
-        lines.append(f"商品ID: {detail.get('goodsId', '')}")
-        lines.append(f"タイトル(中): {detail.get('titleC', '')}")
-        lines.append(f"タイトル(日): {detail.get('titleT', '')}")
-        if detail.get('fromUrl'):
-            lines.append(f"URL: {detail.get('fromUrl')}")
-        if isinstance(detail.get('images'), list):
-            lines.append(f"画像枚数: {len(detail.get('images'))}")
-        gi = detail.get('goodsInfo', {}) if isinstance(detail.get('goodsInfo'), dict) else {}
-        if gi:
-            unit = gi.get('unit')
-            moq = gi.get('minOrderQuantity')
-            pr_type = gi.get('priceRangesType')
-            if unit or moq or pr_type:
-                lines.append("-- 商品情報 --")
-                if unit: lines.append(f"単位: {unit}")
-                if moq is not None: lines.append(f"最小注文数: {moq}")
-                if pr_type: lines.append(f"価格範囲タイプ: {pr_type}")
-            prs = gi.get('priceRanges') or []
-            if prs:
-                lines.append("-- 価格範囲 --")
-                for pr in prs:
-                    lines.append(f"  数量≥{pr.get('startQuantity')}: {pr.get('priceMin')} - {pr.get('priceMax')} RMB")
-            specs = gi.get('specification') or []
-            if specs:
-                lines.append("-- 属性 --")
-                for sp in specs:
-                    keyc = sp.get('keyC') or ''
-                    keyt = sp.get('keyT') or ''
-                    vals = ', '.join([v.get('name','') for v in (sp.get('valueT') or sp.get('valueC') or []) if isinstance(v, dict)])
-                    lines.append(f"  {keyt or keyc}: {vals}")
-            invs = gi.get('goodsInventory') or []
-            if invs:
-                lines.append("-- 在庫 (SKU) --")
-                for inv in invs[:20]:
-                    sku_label = inv.get('keyT') or inv.get('keyC') or ''
-                    entries = inv.get('valueT') or inv.get('valueC') or []
-                    for e in entries[:3]:
-                        lines.append(
-                            f"  {sku_label} | 数量≥{e.get('startQuantity')} 価格:{e.get('price')} 在庫:{e.get('amountOnSale')}"
-                        )
-        return "\n".join(lines)
-
-    def fetch_selected_detail():
-        sel = tree.selection()
-        if not sel:
-            return
-        iid = sel[0]
-        item = nonlocal_data.get(iid)
-        if not item:
-            return
-        gid = item.get("goodsId")
-        try:
-            detail = get_product_detail(goods_id=str(gid), shop_type=shop_type, request_timeout_seconds=timeout, normalize=True)
-            detail_text.delete(1.0, tk.END)
-            if detail:
-                detail_text.insert(tk.END, _render_detail(detail))
-            else:
-                detail_text.insert(tk.END, "詳細を取得できませんでした。")
-        except Exception as e:
-            detail_text.delete(1.0, tk.END)
-            detail_text.insert(tk.END, f"エラー: {e}")
-
     actions = ttk.Frame(root)
     actions.pack(fill=tk.X, padx=8, pady=8)
 
@@ -449,9 +384,83 @@ def run_gui(shop_type: str = "1688", timeout: int = 15, detail_limit: int = 5) -
         except Exception as e:
             messagebox.showerror("エラー", f"説明の表示に失敗しました: {e}")
 
+    def show_detailed_info():
+        sel = tree.selection()
+        if not sel:
+            return
+        item = nonlocal_data.get(sel[0])
+        if not item:
+            return
+        # Fetch normalized detail if not present
+        if not item.get("detailNormalized"):
+            try:
+                detail = get_product_detail(
+                    goods_id=str(item.get("goodsId")),
+                    shop_type=shop_type,
+                    request_timeout_seconds=timeout,
+                    normalize=True,
+                )
+                if detail:
+                    item["detailNormalized"] = detail
+                    item["detailImages"] = detail.get("images", [])
+                    item["detailDescription"] = detail.get("description", "")
+            except Exception as e:
+                messagebox.showerror("エラー", f"詳細取得に失敗しました: {e}")
+                return
+
+        detail = item.get("detailNormalized") or {}
+        win = tk.Toplevel(root)
+        win.title(f"詳細: {item.get('goodsId', '')}")
+        win.geometry("700x600")
+        text = tk.Text(win, wrap=tk.WORD)
+        text.pack(fill=tk.BOTH, expand=True)
+
+        # Compose a readable detailed summary
+        text.insert(tk.END, f"fromUrl: {detail.get('fromUrl')}\n")
+        text.insert(tk.END, f"fromPlatform: {detail.get('fromPlatform')}\n")
+        text.insert(tk.END, f"shopId: {detail.get('shopId')}\n")
+        text.insert(tk.END, f"shopName: {detail.get('shopName')}\n")
+        text.insert(tk.END, f"goodsId: {detail.get('goodsId')}\n")
+        text.insert(tk.END, f"titleC: {detail.get('titleC')}\n")
+        text.insert(tk.END, f"titleT: {detail.get('titleT')}\n")
+        text.insert(tk.END, f"address: {detail.get('address')}\n\n")
+
+        gi = detail.get("goodsInfo", {}) if isinstance(detail.get("goodsInfo"), dict) else {}
+        text.insert(tk.END, "[goodsInfo]\n")
+        text.insert(tk.END, f" unit: {gi.get('unit')}\n")
+        text.insert(tk.END, f" minOrderQuantity: {gi.get('minOrderQuantity')}\n")
+        text.insert(tk.END, f" priceRangesType: {gi.get('priceRangesType')}\n")
+        text.insert(tk.END, " priceRanges:\n")
+        for pr in gi.get("priceRanges", []) or []:
+            text.insert(tk.END, f"  - startQuantity={pr.get('startQuantity')} priceMin={pr.get('priceMin')} priceMax={pr.get('priceMax')}\n")
+        text.insert(tk.END, "\n specification:\n")
+        for sp in gi.get("specification", []) or []:
+            text.insert(tk.END, f"  - {sp.get('keyC')} / {sp.get('keyT')}\n")
+            vals = sp.get('valueC', []) or []
+            if vals:
+                text.insert(tk.END, "    valueC:\n")
+                for v in vals:
+                    text.insert(tk.END, f"      - {v.get('name')} {v.get('picUrl') or ''}\n")
+            vals = sp.get('valueT', []) or []
+            if vals:
+                text.insert(tk.END, "    valueT:\n")
+                for v in vals:
+                    text.insert(tk.END, f"      - {v.get('name')} {v.get('picUrl') or ''}\n")
+        text.insert(tk.END, "\n goodsInventory:\n")
+        for inv in gi.get("goodsInventory", []) or []:
+            text.insert(tk.END, f"  - keyC={inv.get('keyC')} keyT={inv.get('keyT')}\n")
+            for label in ("valueC", "valueT"):
+                entries = inv.get(label, []) or []
+                if entries:
+                    text.insert(tk.END, f"    {label}:\n")
+                    for e in entries:
+                        text.insert(tk.END, f"      - startQuantity={e.get('startQuantity')} price={e.get('price')} amountOnSale={e.get('amountOnSale')} skuId={e.get('skuId')} specId={e.get('specId')}\n")
+
+        ttk.Button(win, text="閉じる", command=win.destroy).pack(pady=6)
+
     ttk.Button(actions, text="画像を開く", command=open_images).pack(side=tk.LEFT)
     ttk.Button(actions, text="説明を開く", command=open_description).pack(side=tk.LEFT, padx=8)
-    ttk.Button(actions, text="選択商品の詳細取得", command=fetch_selected_detail).pack(side=tk.LEFT, padx=8)
+    ttk.Button(actions, text="詳細情報", command=show_detailed_info).pack(side=tk.LEFT, padx=8)
 
     def save_to_postgres():
         try:
@@ -463,19 +472,114 @@ def run_gui(shop_type: str = "1688", timeout: int = 15, detail_limit: int = 5) -
             saved = save_products_to_db(current_products, keyword=kw)
             messagebox.showinfo("保存完了", f"PostgreSQL に {saved} 件保存しました。")
         except Exception as e:
-            messagebox.showerror("エラー", f"保存に失敗しました: {e}")
+            error_msg = str(e)
+            if "does not exist" in error_msg and "catch_copy" in error_msg:
+                # Try to fix the schema and retry
+                try:
+                    fix_products_clean_schema()
+                    saved = save_products_to_db(current_products, keyword=kw)
+                    messagebox.showinfo("保存完了", f"スキーマを修正してPostgreSQL に {saved} 件保存しました。")
+                except Exception as e2:
+                    messagebox.showerror("エラー", f"スキーマ修正後も保存に失敗しました: {e2}")
+            else:
+                messagebox.showerror("エラー", f"保存に失敗しました: {e}")
 
     ttk.Button(actions, text="PostgreSQL に保存", command=save_to_postgres).pack(side=tk.LEFT, padx=8)
 
-    def reset_and_use_enhanced_schema():
+    def reset_and_use_clean_schema():
         try:
-            if messagebox.askyesno("確認", "既存のテーブルを削除し、products_enhanced を作成しますか？ この操作は元に戻せません。"):
-                reset_products_enhanced_table()
-                messagebox.showinfo("完了", "products_enhanced を作成しました。属性は個別の列に保存されます。")
+            if messagebox.askyesno("確認", "既存のテーブル(products, products_flat)を削除し、products_clean のみを作成しますか？ この操作は元に戻せません。"):
+                reset_products_clean_table()
+                messagebox.showinfo("完了", "products_clean を作成しました。以降の保存でクリーン表にも保存されます。")
         except Exception as e:
             messagebox.showerror("エラー", f"初期化に失敗しました: {e}")
 
-    ttk.Button(actions, text="Enhanced スキーマ初期化", command=reset_and_use_enhanced_schema).pack(side=tk.LEFT, padx=8)
+    ttk.Button(actions, text="クリーンスキーマ初期化", command=reset_and_use_clean_schema).pack(side=tk.LEFT, padx=8)
+
+    def fix_schema():
+        try:
+            fix_products_clean_schema()
+            messagebox.showinfo("完了", "データベーススキーマを修正しました。")
+        except Exception as e:
+            messagebox.showerror("エラー", f"スキーマ修正に失敗しました: {e}")
+
+    ttk.Button(actions, text="スキーマ修正", command=fix_schema).pack(side=tk.LEFT, padx=8)
+
+    def optimize_product_names():
+        """Optimize product names using OpenAI API"""
+        try:
+            # Show progress dialog
+            progress_window = tk.Toplevel(root)
+            progress_window.title("商品名最適化")
+            progress_window.geometry("400x200")
+            progress_window.transient(root)
+            progress_window.grab_set()
+            
+            # Center the window
+            progress_window.update_idletasks()
+            x = (progress_window.winfo_screenwidth() // 2) - (400 // 2)
+            y = (progress_window.winfo_screenheight() // 2) - (200 // 2)
+            progress_window.geometry(f"400x200+{x}+{y}")
+            
+            tk.Label(progress_window, text="商品名を最適化中...", font=("Arial", 12)).pack(pady=20)
+            
+            progress_text = tk.Text(progress_window, height=8, width=50)
+            progress_text.pack(pady=10, padx=20, fill=tk.BOTH, expand=True)
+            
+            def run_optimization():
+                try:
+                    progress_text.insert(tk.END, "商品を検索中...\n")
+                    progress_window.update()
+                    
+                    # Get products that need optimization
+                    products = get_products_needing_optimization(limit=50)  # Limit to 50 for GUI
+                    
+                    if not products:
+                        progress_text.insert(tk.END, "最適化が必要な商品が見つかりませんでした。\n")
+                        progress_window.update()
+                        return
+                    
+                    progress_text.insert(tk.END, f"{len(products)}件の商品が見つかりました。\n")
+                    progress_text.insert(tk.END, "OpenAI APIで最適化を開始します...\n")
+                    progress_window.update()
+                    
+                    # Run optimization
+                    result = update_product_names_in_db(limit=50)
+                    
+                    progress_text.insert(tk.END, f"\n最適化完了！\n")
+                    progress_text.insert(tk.END, f"処理済み: {result['processed']}件\n")
+                    progress_text.insert(tk.END, f"成功: {result['successful']}件\n")
+                    progress_text.insert(tk.END, f"失敗: {result['failed']}件\n")
+                    
+                    if result['errors']:
+                        progress_text.insert(tk.END, f"\nエラー:\n")
+                        for error in result['errors'][:3]:  # Show first 3 errors
+                            progress_text.insert(tk.END, f"- {error}\n")
+                    
+                    progress_window.update()
+                    
+                    # Show completion message
+                    messagebox.showinfo("完了", f"商品名の最適化が完了しました！\n\n処理済み: {result['processed']}件\n成功: {result['successful']}件\n失敗: {result['failed']}件")
+                    
+                except Exception as e:
+                    progress_text.insert(tk.END, f"エラーが発生しました: {e}\n")
+                    progress_window.update()
+                    messagebox.showerror("エラー", f"商品名の最適化に失敗しました: {e}")
+                finally:
+                    # Add close button
+                    close_btn = tk.Button(progress_window, text="閉じる", command=progress_window.destroy)
+                    close_btn.pack(pady=10)
+            
+            # Run optimization in a separate thread to avoid blocking GUI
+            import threading
+            thread = threading.Thread(target=run_optimization)
+            thread.daemon = True
+            thread.start()
+            
+        except Exception as e:
+            messagebox.showerror("エラー", f"商品名最適化の開始に失敗しました: {e}")
+
+    ttk.Button(actions, text="商品名最適化", command=optimize_product_names).pack(side=tk.LEFT, padx=8)
 
     nonlocal_data: dict = {}
 

@@ -30,9 +30,13 @@ def enrich_products_with_detail(
             goods_id=goods_id,
             shop_type=item.get("shopType", shop_type),
             request_timeout_seconds=request_timeout_seconds,
+            normalize=True,
         )
         if detail:
+            # Preserve existing fields for backward compatibility
             item["detailImages"] = detail.get("images", [])
             item["detailDescription"] = detail.get("description", "")
+            # Add normalized payload for richer GUI display
+            item["detailNormalized"] = detail
 
 
